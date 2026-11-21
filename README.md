@@ -1,4 +1,4 @@
-e2player - player de TV ao estilo MAG (Infomir) para boxes Enigma2.
+e2player Windows - player de TV ao estilo MAG (Infomir) para streaming de boxes Enigma2.
 
   * grupos = bouquets da box (+ Favoritos e Todos os canais)
   * lista de canais com programa atual e barra de progresso
