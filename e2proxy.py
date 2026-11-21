@@ -889,14 +889,17 @@ class OpenWebif:
     def epg_nownext(self, bref):
         """{normref: [eventos agora/seguinte]} para um bouquet."""
         out = {}
+        errors = []
         for path in ("/web/epgnow?bRef=", "/web/epgnext?bRef="):
             try:
-                evs = self._events(self.xml(path + self.q(bref), timeout=30))
+                evs = self._events(self.xml(path + self.q(bref), timeout=45))
             except Exception as e:
-                log.warning("EPG %s falhou: %s", path.split("?")[0], e)
+                errors.append("%s: %s" % (path.split("?")[0], e))
                 continue
             for ev in evs:
                 out.setdefault(normref(ev["ref"]), []).append(ev)
+        if len(errors) == 2:
+            raise RuntimeError("; ".join(errors))
         for v in out.values():
             v.sort(key=lambda ev: ev["start"])
         return out
