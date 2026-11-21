@@ -36,3 +36,8 @@ Teclas (lista):
   OK                          1.º OK reproduz na pré-visualização,
                               2.º OK passa a ecrã inteiro
   E / G  guia do canal    F  favorito    Esc  voltar ao vídeo
+
+
+<img width="1920" height="1079" alt="channel_list_with_preview" src="https://github.com/user-attachments/assets/722a33cc-27cb-45d5-9067-de2902c247c4" />
+
+<img width="1920" height="1079" alt="channel_streaming" src="https://github.com/user-attachments/assets/0ef1e0be-34e3-4d27-9923-dad6441b05db" />
