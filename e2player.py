@@ -273,6 +273,12 @@ class App:
 
         self.q = queue.Queue()
         self.pool = ThreadPoolExecutor(max_workers=4)
+        # EPG pedido um bouquet de cada vez, para não sobrecarregar o OpenWebif
+        self.epg_pool = ThreadPoolExecutor(max_workers=1)
+        self.epg_ok = {}          # bref -> hora do último EPG obtido com sucesso
+        self.epg_fail = {}        # bref -> tentativas falhadas seguidas
+        self.epg_pending = set()
+        self.epg_job = None
 
         self._build_ui()
         self._init_vlc()
@@ -284,14 +290,14 @@ class App:
         self.load_channels()
 
     # ------------------------------------------------------------ infra
-    def run_bg(self, fn, cb, *args):
+    def run_bg(self, fn, cb, *args, pool=None):
         def task():
             try:
                 res, err = fn(*args), None
             except Exception as e:  # noqa: BLE001
                 res, err = None, e
             self.q.put((cb, res, err))
-        self.pool.submit(task)
+        (pool or self.pool).submit(task)
 
     def _poll(self):
         try:
@@ -415,7 +421,7 @@ class App:
         W, H = self.root.winfo_width(), self.root.winfo_height()
         self.infobar.place(x=int(W * 0.03), y=int(H * 0.76),
                            width=int(W * 0.94), height=int(H * 0.21))
-        self.infobar.lift()
+        tk.Misc.lift(self.infobar)   # Canvas.lift() é tag_raise
 
     def toggle_mode(self):
         if self.mode == "full":
@@ -806,26 +812,53 @@ class App:
         last = self.model.by_key.get(normref(self.cfg.get("last", "")))
         self.select_group(0)
         if last:
+            self.playing = last          # para o EPG começar pelo bouquet deste canal
+            self.play_group = last.group
+        self.refresh_epg()               # antes de tudo o resto: um erro na UI não impede o EPG
+        if last:
             self.play(last, last.group)
             self.go_full()
         else:
             self.focus = "groups"
             self.redraw()
-        self.refresh_epg()
 
     def refresh_epg(self):
-        for g in self.model.bouquets:
-            if g.bref:
-                self.run_bg(self.owif.epg_nownext,
-                            lambda data, err, b=g.bref: self._epg_nownext(b, data, err), g.bref)
-        self.root.after(10 * 60 * 1000, self.refresh_epg)
+        """Pede o EPG agora/seguinte de todos os bouquets (o do canal atual primeiro)."""
+        brefs = [g.bref for g in self.model.bouquets if g.bref]
+        if self.playing and self.playing.group.bref in brefs:
+            brefs.remove(self.playing.group.bref)
+            brefs.insert(0, self.playing.group.bref)
+        for b in brefs:
+            self.load_epg(b)
+        if self.epg_job:
+            self.root.after_cancel(self.epg_job)
+        self.epg_job = self.root.after(10 * 60 * 1000, self.refresh_epg)
+
+    def load_epg(self, bref):
+        if bref in self.epg_pending:
+            return
+        self.epg_pending.add(bref)
+        self.model.epg_time[bref] = time.time()
+        self.run_bg(self.owif.epg_nownext,
+                    lambda data, err, b=bref: self._epg_nownext(b, data, err),
+                    bref, pool=self.epg_pool)
 
     def _epg_nownext(self, bref, data, err):
-        if err:
-            log.warning("EPG agora/seguinte falhou: %s", err)
-            self.model.epg_time[bref] = time.time()
+        self.epg_pending.discard(bref)
+        name = next((g.name for g in self.model.bouquets if g.bref == bref), bref)
+        if err or not data:
+            n = self.epg_fail.get(bref, 0) + 1
+            self.epg_fail[bref] = n
+            delay = min(15 * n, 120)
+            log.warning("EPG de '%s' %s (tentativa %d) - nova tentativa em %ds", name,
+                        "falhou: %s" % err if err else "veio vazio", n, delay)
+            if n <= 8:
+                self.root.after(delay * 1000, lambda b=bref: self.load_epg(b))
             return
-        self.model.merge_epg(bref, data or {})
+        self.epg_fail.pop(bref, None)
+        self.epg_ok[bref] = time.time()
+        log.info("EPG de '%s': %d canais", name, len(data))
+        self.model.merge_epg(bref, data)
         self.redraw()
 
     def _refresh_stale_epg(self):
@@ -834,10 +867,15 @@ class App:
             chans = self.model.groups[self.gi].channels[self.ctop:self.ctop + 30]
         if self.playing:
             chans.append(self.playing)
-        for b in self.model.stale_brefs(chans):
-            self.model.epg_time[b] = time.time()
-            self.run_bg(self.owif.epg_nownext,
-                        lambda data, err, bb=b: self._epg_nownext(bb, data, err), b)
+        stale = set(self.model.stale_brefs(chans))
+        # bouquets visíveis cujo EPG nunca chegou (e que não estão em espera de nova tentativa)
+        for ch in chans:
+            b = ch.group.bref
+            if b and b not in self.epg_ok and self.epg_fail.get(b, 0) > 8:
+                self.epg_fail[b] = 0
+                stale.add(b)
+        for b in stale:
+            self.load_epg(b)
 
     # ------------------------------------------------------------ vídeo
     def _init_vlc(self):
