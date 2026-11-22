@@ -37,6 +37,7 @@ Teclas (lista):
                               2.º OK passa a ecrã inteiro
   E / G  guia do canal    F  favorito    Esc  voltar ao vídeo
 
+Screenshots:
 
 <img width="1920" height="1079" alt="channel_list_with_preview" src="https://github.com/user-attachments/assets/61124100-95d8-4821-83d9-8875954d5623" />
 
