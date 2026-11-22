@@ -42,3 +42,25 @@ Screenshots:
 <img width="1920" height="1079" alt="channel_list_with_preview" src="https://github.com/user-attachments/assets/61124100-95d8-4821-83d9-8875954d5623" />
 
 <img width="1920" height="1079" alt="channel_streaming" src="https://github.com/user-attachments/assets/0ef1e0be-34e3-4d27-9923-dad6441b05db" />
+
+TVHPlayer:
+
+tvhplayer - player de TV estilo MAG (a mesma interface do e2player) para
+servidores TVHeadend. Sem proxy: o VLC liga-se diretamente ao TVHeadend.
+
+  * grupos = etiquetas de canais (channel tags) do TVHeadend
+    (+ Favoritos e Todos os canais)
+  * números dos canais = os do TVHeadend
+  * EPG agora/seguinte e guia completo vindos do TVHeadend
+  * ícones dos canais (imagecache do TVHeadend)
+  * com utilizador/palavra-passe, o stream usa um "ticket" (não expõe a palavra-passe)
+
+Requisitos: os mesmos do e2player (Python 3.8+ com Tkinter, VLC, python-vlc,
+opcional pillow) e os ficheiros e2player.py e e2proxy.py na mesma pasta.
+
+Uso:
+  python tvhplayer.py --server 192.168.1.10 [--port 9981] [--user u --password p]
+                      [--profile pass]
+  (fica guardado em ~/.tvhplayer.json; nas vezes seguintes basta  python tvhplayer.py)
+
+As teclas são as mesmas do e2player (Ctrl+Q para sair).
