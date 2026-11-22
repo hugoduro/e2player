@@ -127,17 +127,23 @@ class Model:
         self.favorites = list(favorites)
         self.nownext = {}          # normref -> [eventos]
         self.epg_time = {}         # bref -> última atualização
+        self.sort_all_by_num = False
 
     def load(self, bouquets):
         num = 0
         self.bouquets, self.by_num, self.by_key = [], {}, {}
         for name, bref, chans in bouquets:
             g = Group(name, bref)
-            for ref, cname in chans:
-                num += 1
-                ch = Channel(num, cname or ref, ref, g)
+            for item in chans:
+                ref, cname = item[0], item[1]
+                if len(item) > 2 and item[2]:      # número dado pela fonte (TVHeadend)
+                    n = int(item[2])
+                else:
+                    num += 1
+                    n = num
+                ch = Channel(n, cname or ref, ref, g)
                 g.channels.append(ch)
-                self.by_num[num] = ch
+                self.by_num.setdefault(n, ch)
                 self.by_key.setdefault(ch.key, ch)
             self.bouquets.append(g)
         self.rebuild_groups()
@@ -148,7 +154,14 @@ class Model:
         if favs:
             groups.append(Group("★ Favoritos", None, favs, "fav"))
         groups += self.bouquets
-        allch = [ch for g in self.bouquets for ch in g.channels]
+        allch, seen = [], set()
+        for g in self.bouquets:
+            for ch in g.channels:
+                if ch.key not in seen:
+                    seen.add(ch.key)
+                    allch.append(self.by_key.get(ch.key, ch))
+        if self.sort_all_by_num:
+            allch.sort(key=lambda c: (c.num, c.name.lower()))
         if allch:
             groups.append(Group("Todos os canais", None, allch, "all"))
         self.groups = groups
@@ -239,14 +252,16 @@ def elide(font, text, maxw):
 # ----------------------------------------------------------------------------
 
 class App:
-    def __init__(self, root, cfg, owif, proxy_port):
+    def __init__(self, root, cfg, source, config_path=None):
         import vlc
         self.vlcmod = vlc
         self.root = root
         self.cfg = cfg
-        self.owif = owif
-        self.proxy_port = proxy_port
+        self.source = source
+        self.config_path = config_path or CONFIG_PATH
+        self.play_token = None
         self.model = Model(cfg.get("favorites", []))
+        self.model.sort_all_by_num = getattr(source, "sort_all_by_num", False)
 
         self.mode = "list"          # "list" | "full"
         self.focus = "groups"       # "groups" | "channels"
@@ -326,7 +341,7 @@ class App:
         if self.playing:
             self.cfg["last"] = self.playing.ref
         try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.cfg, f, indent=2, ensure_ascii=False)
         except OSError as e:
             log.warning("não foi possível guardar a configuração: %s", e)
@@ -578,7 +593,7 @@ class App:
         p = self.picons.get(ch.key)
         if p is None:
             self.picons[ch.key] = "loading"
-            self.run_bg(self.owif.picon, lambda data, err, k=ch.key, bh=box_h:
+            self.run_bg(self.source.picon, lambda data, err, k=ch.key, bh=box_h:
                         self._picon_loaded(k, data, bh), ch.ref)
             return None
         return p if p not in ("loading", "none") else None
@@ -724,7 +739,7 @@ class App:
         self.epg_events = None
         self.epg_sel = self.epg_top = 0
         self.layout()
-        self.run_bg(self.owif.epg_service, lambda evs, err, c=ch: self._epg_loaded(c, evs, err),
+        self.run_bg(self.source.epg_service, lambda evs, err, c=ch: self._epg_loaded(c, evs, err),
                     ch.ref)
 
     def _epg_loaded(self, ch, evs, err):
@@ -798,7 +813,7 @@ class App:
     def load_channels(self):
         self.status = "A carregar canais da box…"
         self.redraw()
-        self.run_bg(self.owif.bouquets, self._channels_loaded, self.cfg.get("radio", False))
+        self.run_bg(self.source.bouquets, self._channels_loaded, self.cfg.get("radio", False))
 
     def _channels_loaded(self, bouquets, err):
         if err or not bouquets:
@@ -839,7 +854,7 @@ class App:
             return
         self.epg_pending.add(bref)
         self.model.epg_time[bref] = time.time()
-        self.run_bg(self.owif.epg_nownext,
+        self.run_bg(self.source.epg_nownext,
                     lambda data, err, b=bref: self._epg_nownext(b, data, err),
                     bref, pool=self.epg_pool)
 
@@ -898,10 +913,6 @@ class App:
         em.event_attach(vlc.EventType.MediaPlayerEndReached,
                         lambda e: self.q.put((self._on_vlc_end, "fim", None)))
 
-    def stream_url(self, ch):
-        return "http://127.0.0.1:%d/stream/%s" % (
-            self.proxy_port, urllib.parse.quote(ch.ref, safe=":"))
-
     def play(self, ch, group=None, keep_retry=False):
         if not ch:
             return
@@ -911,15 +922,26 @@ class App:
         self.play_group = group or self.play_group or ch.group
         if not keep_retry:
             self.retry = 0
-        media = self.vlc.media_new(self.stream_url(ch))
-        self.player.set_media(media)
-        self.player.play()
-        self.player.audio_set_volume(self.volume)
-        self.root.after(800, lambda: self.player.audio_set_volume(self.volume))
+        # o URL pode exigir um pedido à fonte (ticket do TVHeadend): faz-se em segundo plano
+        tok = self.play_token = object()
+        self.run_bg(self.source.stream_url,
+                    lambda url, err, c=ch, t=tok: self._start_media(c, t, url, err), ch.ref)
         log.info("a reproduzir %d %s", ch.num, ch.name)
         self.save_cfg()
         self.redraw()
         self.show_infobar()
+
+    def _start_media(self, ch, tok, url, err):
+        if tok is not self.play_token:
+            return                       # entretanto mudou-se de canal
+        if err or not url:
+            log.error("não foi possível obter o stream de %s: %s", ch.name, err)
+            self.show_toast("Não foi possível obter o stream de %s" % ch.name, 5)
+            return
+        self.player.set_media(self.vlc.media_new(url))
+        self.player.play()
+        self.player.audio_set_volume(self.volume)
+        self.root.after(800, lambda: self.player.audio_set_volume(self.volume))
 
     def _on_vlc_end(self, what, _err):
         if not self.playing:
@@ -1227,6 +1249,36 @@ class App:
 
 
 # ----------------------------------------------------------------------------
+# Fonte de canais: Enigma2 (OpenWebif + e2proxy)
+# ----------------------------------------------------------------------------
+
+class E2Source:
+    """Canais/EPG do OpenWebif; os streams passam pelo e2proxy embutido."""
+    title = "e2player"
+    sort_all_by_num = False
+
+    def __init__(self, owif, proxy_port):
+        self.owif = owif
+        self.proxy_port = proxy_port
+
+    def bouquets(self, radio=False):
+        return self.owif.bouquets(radio)
+
+    def epg_nownext(self, bref):
+        return self.owif.epg_nownext(bref)
+
+    def epg_service(self, ref):
+        return self.owif.epg_service(ref)
+
+    def picon(self, ref):
+        return self.owif.picon(ref)
+
+    def stream_url(self, ref):
+        return "http://127.0.0.1:%d/stream/%s" % (
+            self.proxy_port, urllib.parse.quote(ref, safe=":"))
+
+
+# ----------------------------------------------------------------------------
 # Arranque
 # ----------------------------------------------------------------------------
 
@@ -1288,7 +1340,7 @@ def main():
     else:
         root.attributes("-fullscreen", True)
     root.update_idletasks()
-    App(root, cfg, owif, port)
+    App(root, cfg, E2Source(owif, port))
     root.mainloop()
 
 
